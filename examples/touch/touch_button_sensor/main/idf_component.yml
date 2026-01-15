@@ -10,3 +10,5 @@ dependencies:
   touch_button_sensor:
     version: "*"
     override_path: "../../../../components/touch/touch_button_sensor"
+  espressif/esp32_p4_function_ev_board:
+    version: "*"

@@ -492,7 +492,7 @@ esp_err_t touch_button_sensor_handle_events(touch_button_handle_t handle)
                     touch_sensor_fsm_get_data(sensor->fsm_handles[i], sensor->channel_list[j], raw_data),
                     TAG, "Failed to get FSM data"
                 );
-                PRINT_VALUE(sensor->channel_list[j] + i * 100, raw_data[FSM_DATA_RAW], raw_data[FSM_DATA_SMOOTH], raw_data[FSM_DATA_BASELINE]);
+                PRINT_VALUE(sensor->channel_list[j] + 1 + i * 4, raw_data[FSM_DATA_RAW], raw_data[FSM_DATA_SMOOTH], raw_data[FSM_DATA_BASELINE]);
             }
 #endif
         }
