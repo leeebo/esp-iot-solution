@@ -2,4 +2,4 @@
 cmake_minimum_required(VERSION 3.5)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(touch_button_sensor)
+project(touch_button_sensor LANGUAGES C CXX)

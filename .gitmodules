@@ -1,0 +1,3 @@
+[submodule "examples/touch/touch_button_sensor/components/FastLED"]
+	path = examples/touch/touch_button_sensor/components/FastLED
+	url = https://github.com/FastLED/FastLED

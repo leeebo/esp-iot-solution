@@ -6,11 +6,11 @@ A component providing enhanced touch button detection functionality for ESP32 se
 
 ## Features
 
-- Multi-frequency touch sampling for improved noise immunity
-- FSM-based touch detection with configurable thresholds
-- Debounce support for reliable state changes
-- Support for multiple touch channels
-- Callback-based event notification
+- Unified multi-frequency touch sampling for superior noise immunity
+- Single-FSM architecture with internal data fusion and state processing
+- Permille-based coefficient configuration and unscaled parameter handling
+- Efficient debounce and anomaly monitoring (Cover/Negative reset)
+- Callback-based event notification for touch state changes
 
 ## Dependencies
 

@@ -18,6 +18,8 @@
 #define TEST_TOUCH_CHANNEL_1      9
 #define TEST_TOUCH_CHANNEL_2      8
 
+static const char *TAG = "test_touch_button";
+
 static touch_button_handle_t s_touch_button = NULL;
 static size_t before_free_8bit;
 static size_t before_free_32bit;
@@ -44,52 +46,26 @@ static uint64_t get_time_in_ms(void)
 
 static void touch_button_callback(touch_button_handle_t handle, uint32_t channel, touch_state_t state, void *user_data)
 {
-    uint32_t bitmap = 0;
-    touch_button_sensor_get_state_bitmap(handle, channel, &bitmap);
+    uint32_t data = 0;
+    touch_button_sensor_get_data(handle, channel, &data);
 
-    uint32_t data[SOC_TOUCH_SAMPLE_CFG_NUM] = {0};
     if (state == TOUCH_STATE_ACTIVE) {
-        for (int i = 0; i < SOC_TOUCH_SAMPLE_CFG_NUM; i++) {
-            touch_button_sensor_get_data(handle, channel, i, &data[i]);
-        }
-        PRINT_TRIGGER(channel, data[0], true);
-        if (SOC_TOUCH_SAMPLE_CFG_NUM > 1) {
-            PRINT_TRIGGER(channel * 100 + 1, data[1], true);
-        }
-        if (SOC_TOUCH_SAMPLE_CFG_NUM > 2) {
-            PRINT_TRIGGER(channel * 100 + 2, data[2], true);
-        }
-        printf("Channel %"PRIu32" is Active", channel);
-        // if log level is set to debug, print the bitmap
-        printf(", state bitmap: 0x%08" PRIx32, bitmap);
-        printf("\n");
+        ESP_LOGI(TAG, "Channel %"PRIu32" is Active, fused data: %"PRIu32, channel, data);
     } else if (state == TOUCH_STATE_INACTIVE) {
-        for (int i = 0; i < SOC_TOUCH_SAMPLE_CFG_NUM; i++) {
-            touch_button_sensor_get_data(handle, channel, i, &data[i]);
-        }
-        PRINT_TRIGGER(channel, data[0], false);
-        if (SOC_TOUCH_SAMPLE_CFG_NUM > 1) {
-            PRINT_TRIGGER(channel * 100 + 1, data[1], false);
-        }
-        if (SOC_TOUCH_SAMPLE_CFG_NUM > 2) {
-            PRINT_TRIGGER(channel * 100 + 2, data[2], false);
-        }
-        printf("Channel %"PRIu32" is Inactive", channel);
-        printf(", state bitmap:0x%08" PRIx32, bitmap);
-        printf("\n");
+        ESP_LOGI(TAG, "Channel %"PRIu32" is Inactive, fused data: %"PRIu32, channel, data);
     }
 }
 
 TEST_CASE("touch button sensor create/delete test", "[touch_button_sensor][create]")
 {
     uint32_t channel_list[] = {TEST_TOUCH_CHANNEL_1};
-    float threshold[] = {0.007f};
+    uint32_t thresholds[] = {50};
     touch_button_config_t config = {
         .channel_num = 1,
         .channel_list = channel_list,
-        .channel_threshold = threshold,
-        .channel_gold_value = NULL,
-        .debounce_times = 3,
+        .thresholds = thresholds,
+        .debounce_active = 2,
+        .debounce_inactive = 1,
         .skip_lowlevel_init = false
     };
 
@@ -105,13 +81,13 @@ TEST_CASE("touch button sensor create/delete test", "[touch_button_sensor][creat
 TEST_CASE("touch button sensor data and state test", "[touch_button_sensor][data]")
 {
     uint32_t channel_list[] = {TEST_TOUCH_CHANNEL_1};
-    float threshold[] = {0.007f};
+    uint32_t thresholds[] = {50};
     touch_button_config_t config = {
         .channel_num = 1,
         .channel_list = channel_list,
-        .channel_threshold = threshold,
-        .channel_gold_value = NULL,
-        .debounce_times = 3,
+        .thresholds = thresholds,
+        .debounce_active = 2,
+        .debounce_inactive = 1,
         .skip_lowlevel_init = false
     };
 
@@ -119,8 +95,8 @@ TEST_CASE("touch button sensor data and state test", "[touch_button_sensor][data
 
     // Test get_data API
     uint32_t data = 0;
-    TEST_ASSERT_EQUAL(ESP_OK, touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_1, 0, &data));
-    TEST_ASSERT_NOT_EQUAL(ESP_OK, touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_2, 0, &data));
+    TEST_ASSERT_EQUAL(ESP_OK, touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_1, &data));
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_2, &data));
 
     // Test get_state API
     touch_state_t state;
@@ -128,13 +104,6 @@ TEST_CASE("touch button sensor data and state test", "[touch_button_sensor][data
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, touch_button_sensor_get_state(s_touch_button, TEST_TOUCH_CHANNEL_1, NULL));
     TEST_ASSERT_EQUAL(ESP_OK, touch_button_sensor_get_state(s_touch_button, TEST_TOUCH_CHANNEL_1, &state));
     TEST_ASSERT_NOT_EQUAL(ESP_OK, touch_button_sensor_get_state(s_touch_button, TEST_TOUCH_CHANNEL_2, &state));
-
-    // Test get_state_bitmap API
-    uint32_t bitmap;
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, touch_button_sensor_get_state_bitmap(NULL, TEST_TOUCH_CHANNEL_1, &bitmap));
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, touch_button_sensor_get_state_bitmap(s_touch_button, TEST_TOUCH_CHANNEL_1, NULL));
-    TEST_ASSERT_EQUAL(ESP_OK, touch_button_sensor_get_state_bitmap(s_touch_button, TEST_TOUCH_CHANNEL_1, &bitmap));
-    TEST_ASSERT_NOT_EQUAL(ESP_OK, touch_button_sensor_get_state_bitmap(s_touch_button, TEST_TOUCH_CHANNEL_2, &bitmap));
 
     // Clean up
     TEST_ASSERT_EQUAL(ESP_OK, touch_button_sensor_delete(s_touch_button));
@@ -144,13 +113,13 @@ TEST_CASE("touch button sensor data and state test", "[touch_button_sensor][data
 TEST_CASE("touch button sensor event handling test", "[touch_button_sensor][events]")
 {
     uint32_t channel_list[] = {TEST_TOUCH_CHANNEL_1};
-    float threshold[] = {0.007f};
+    uint32_t thresholds[] = {50};
     touch_button_config_t config = {
         .channel_num = 1,
         .channel_list = channel_list,
-        .channel_threshold = threshold,
-        .channel_gold_value = NULL,
-        .debounce_times = 3,
+        .thresholds = thresholds,
+        .debounce_active = 2,
+        .debounce_inactive = 1,
         .skip_lowlevel_init = false
     };
 
@@ -164,15 +133,8 @@ TEST_CASE("touch button sensor event handling test", "[touch_button_sensor][even
     for (int i = 0; i < 100; i++) {
         uint32_t data;
         touch_button_sensor_handle_events(s_touch_button);
-        touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_1, 0, &data);
-        PRINT_VALUE((uint32_t)TEST_TOUCH_CHANNEL_1, data, data, data);
-        if (SOC_TOUCH_SAMPLE_CFG_NUM > 1) {
-            touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_1, 1, &data);
-            PRINT_VALUE((uint32_t)TEST_TOUCH_CHANNEL_1 * 100 + 1, data, data, data);
-        }
-        if (SOC_TOUCH_SAMPLE_CFG_NUM > 2) {
-            touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_1, 2, &data);
-            PRINT_VALUE((uint32_t)TEST_TOUCH_CHANNEL_1 * 100 + 2, data, data, data);
+        if (touch_button_sensor_get_data(s_touch_button, TEST_TOUCH_CHANNEL_1, &data) == ESP_OK) {
+            PRINT_VALUE((uint32_t)TEST_TOUCH_CHANNEL_1, data, data, data);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }

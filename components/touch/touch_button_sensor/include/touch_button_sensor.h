@@ -36,11 +36,11 @@ typedef void(*touch_cb_t)(touch_button_handle_t handle, uint32_t channel, touch_
  * @brief Configuration structure for touch button sensor
  */
 typedef struct {
-    uint32_t channel_num;          /*!< Number of touch button sensor channels */
-    uint32_t *channel_list;        /*!< Touch channel list */
-    float *channel_threshold;       /*!< Threshold for touch detection for each channel */
-    uint32_t *channel_gold_value;   /*!< (Optional) Reference values for touch channels */
-    uint32_t debounce_times;        /*!< Number of consecutive readings needed to confirm state change */
+    uint32_t channel_num;           /*!< Number of touch button sensor channels */
+    uint32_t *channel_list;         /*!< Touch channel list */
+    uint32_t *thresholds;           /*!< Thresholds for touch detection (unscaled absolute, per-channel) */
+    uint32_t debounce_active;       /*!< Active debounce count (sequential triggers to active) */
+    uint32_t debounce_inactive;     /*!< Inactive debounce count (sequential triggers to inactive) */
     bool skip_lowlevel_init;        /*!< Skip low level initialization when working with existing touch driver */
 } touch_button_config_t;
 
@@ -78,15 +78,13 @@ esp_err_t touch_button_sensor_create(touch_button_config_t *config, touch_button
 esp_err_t touch_button_sensor_delete(touch_button_handle_t handle);
 
 /**
- * @brief Get touch sensor data for a specific channel and frequency
+ * @brief Get touch sensor data for a specific channel
  *
- * Retrieves the smoothed touch sensor reading from the specified channel
- * and frequency instance.
+ * Retrieves the fsm output data for a specific channel
  *
  * @param handle        Touch button sensor handle
  * @param channel       Touch channel number
- * @param channel_alt   Frequency instance index (0 to SOC_TOUCH_SAMPLE_CFG_NUM-1)
- * @param data         Pointer to store the smoothed touch sensor data
+ * @param data          Pointer to store the touch sensor data
  *
  * @return
  *     - ESP_OK on success
@@ -94,13 +92,13 @@ esp_err_t touch_button_sensor_delete(touch_button_handle_t handle);
  *     - ESP_ERR_INVALID_STATE if sensor not initialized
  *     - ESP_ERR_NOT_FOUND if channel not configured
  */
-esp_err_t touch_button_sensor_get_data(touch_button_handle_t handle, uint32_t channel, uint32_t channel_alt, uint32_t *data);
+esp_err_t touch_button_sensor_get_data(touch_button_handle_t handle, uint32_t channel, uint32_t *data);
 
 /**
  * @brief Get current state of a touch channel
  *
  * Returns whether the touch channel is currently considered active (touched)
- * based on the combined state of all frequency instances.
+ * based on the FSM state output.
  *
  * @param handle    Touch button sensor handle
  * @param channel   Touch channel number
@@ -113,24 +111,6 @@ esp_err_t touch_button_sensor_get_data(touch_button_handle_t handle, uint32_t ch
  *     - ESP_ERR_NOT_FOUND if channel not configured
  */
 esp_err_t touch_button_sensor_get_state(touch_button_handle_t handle, uint32_t channel, touch_state_t *state);
-
-/**
- * @brief Get active frequency bitmap for a touch channel
- *
- * Returns a bitmap indicating which frequency instances have detected
- * a touch on the specified channel. Each bit corresponds to one frequency.
- *
- * @param handle    Touch button sensor handle
- * @param channel   Touch channel number
- * @param bitmap    Pointer to store the frequency activation bitmap
- *
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if handle or bitmap is NULL
- *     - ESP_ERR_INVALID_STATE if sensor not initialized
- *     - ESP_ERR_NOT_FOUND if channel not configured
- */
-esp_err_t touch_button_sensor_get_state_bitmap(touch_button_handle_t handle, uint32_t channel, uint32_t *bitmap);
 
 /**
  * @brief Handle pending touch sensor events

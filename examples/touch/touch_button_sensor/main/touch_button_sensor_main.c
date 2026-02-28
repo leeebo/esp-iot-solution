@@ -10,22 +10,32 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "touch_button_sensor.h"
+#include "led_matrix.h"
 
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "bsp/esp32_p4_function_ev_board.h"
 #include "esp_codec_dev.h"
-uint32_t channel_list[] = {1, 2, 3, 4};        // gpio 9, 11, 13
-float channel_threshold[] = {0.006, 0.006, 0.006, 0.006}; // 1%
-#define TOUCH_DEBOUNCE_TIMES 2
-#elif CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32S2
-uint32_t channel_list[] = {8, 10, 12}; // gpio 8, 10, 12
-float channel_threshold[] = {0.02, 0.02, 0.02}; // 2%
-#define TOUCH_DEBOUNCE_TIMES 2
-#elif CONFIG_IDF_TARGET_ESP32
-uint32_t channel_list[] = {8, 6, 4}; // gpio 33, 14, 13
-float channel_threshold[] = {0.01, 0.01, 0.01}; // 1%
-#define TOUCH_DEBOUNCE_TIMES 2
 #endif
+
+uint32_t channel_list[] = {1, 2, 3, 4}; // gpio 9, 11, 13
+uint32_t channel_threshold[] = {120, 120, 120, 120};
+#define TOUCH_DEBOUNCE_ACTIVE 1
+#define TOUCH_DEBOUNCE_INACTIVE 1
+
+static uint8_t channel_energy[4] = {0, 0, 0, 0};
+static uint32_t active_channel = 0;
+
+// LED event queue — callback sends events, anim task processes them
+typedef enum {
+    LED_EVENT_ACTIVE,
+    LED_EVENT_INACTIVE
+} led_event_type_t;
+typedef struct {
+    led_event_type_t type;
+    uint32_t channel; // 1-based
+    uint32_t color;   // only valid for LED_EVENT_ACTIVE
+} led_event_t;
+static QueueHandle_t led_event_queue = NULL;
 
 static const char *TAG = "touch_button_sensor";
 
@@ -33,12 +43,12 @@ static const char *TAG = "touch_button_sensor";
 static esp_codec_dev_handle_t spk_codec_dev = NULL;
 static QueueHandle_t audio_event_queue = NULL;
 
-#define AUDIO_SAMPLE_RATE    16000
-#define AUDIO_CHANNELS       2
-#define BEEP_DURATION_MS     200
-#define AUDIO_BUFFER_SIZE    (AUDIO_SAMPLE_RATE * BEEP_DURATION_MS / 1000 * AUDIO_CHANNELS)
-#define NUM_BEEP_TONES       4
-#define AUDIO_VOLUME         60  // Volume level (0-100)
+#define AUDIO_SAMPLE_RATE 16000
+#define AUDIO_CHANNELS 2
+#define BEEP_DURATION_MS 200
+#define AUDIO_BUFFER_SIZE (AUDIO_SAMPLE_RATE * BEEP_DURATION_MS / 1000 * AUDIO_CHANNELS)
+#define NUM_BEEP_TONES 4
+#define AUDIO_VOLUME 80 // Volume level (0-100)
 
 // Different beep frequencies for different channels (higher frequencies for better clarity)
 static const uint32_t beep_frequencies[] = {880, 988, 1047, 1319}; // A5, B5, C6, E6
@@ -69,16 +79,40 @@ static void generate_beep_tone(int16_t *buffer, size_t samples, uint32_t frequen
 
 static void touch_state_callback(touch_button_handle_t handle, uint32_t channel, touch_state_t state, void *user_data)
 {
+    static const uint32_t colors[] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00};
+
     if (state == TOUCH_STATE_ACTIVE) {
-        ESP_LOGI(TAG, "Channel %"PRIu32" is Active", channel);
+        active_channel = channel;
+        ESP_LOGI(TAG, "Channel %" PRIu32 " is Active", channel);
+
 #if CONFIG_IDF_TARGET_ESP32P4
-        // Send channel number to audio task for playing beep
         if (audio_event_queue != NULL) {
             xQueueSend(audio_event_queue, &channel, 0);
         }
 #endif
+        // Notify LED task via queue — no direct LED calls here
+        if (led_event_queue != NULL) {
+            led_event_t evt = {
+                .type = LED_EVENT_ACTIVE,
+                .channel = channel,
+                .color = colors[(channel - 1) % 4],
+            };
+            xQueueSend(led_event_queue, &evt, 0);
+        }
     } else if (state == TOUCH_STATE_INACTIVE) {
-        ESP_LOGI(TAG, "Channel %"PRIu32" is Inactive", channel);
+        if (active_channel == channel) {
+            active_channel = 0;
+        }
+        ESP_LOGI(TAG, "Channel %" PRIu32 " is Inactive", channel);
+
+        if (led_event_queue != NULL) {
+            led_event_t evt = {
+                .type = LED_EVENT_INACTIVE,
+                .channel = channel,
+                .color = 0,
+            };
+            xQueueSend(led_event_queue, &evt, 0);
+        }
     }
 }
 
@@ -88,7 +122,7 @@ static void touch_button_task(void *pvParameters)
     touch_button_handle_t handle = (touch_button_handle_t)pvParameters;
     while (1) {
         touch_button_sensor_handle_events(handle);
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -104,30 +138,56 @@ static void audio_play_task(void *pvParameters)
         .bits_per_sample = 16,
     };
 
-    // Open codec once at the beginning with higher volume
+    // Open codec once — do not re-open on every beep
     esp_codec_dev_set_out_vol(spk_codec_dev, AUDIO_VOLUME);
     if (esp_codec_dev_open(spk_codec_dev, &fs) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open codec");
+        ESP_LOGE(TAG, "Failed to open audio codec");
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "Audio codec opened successfully with volume %d", AUDIO_VOLUME);
+    ESP_LOGI(TAG, "Audio codec opened (vol=%d)", AUDIO_VOLUME);
 
     while (1) {
-        // Wait for touch event
         if (xQueueReceive(audio_event_queue, &channel, portMAX_DELAY)) {
-            ESP_LOGI(TAG, "Playing beep for channel %"PRIu32, channel);
-
-            // Get the pre-generated buffer for this channel
             uint32_t freq_index = (channel - 1) % NUM_BEEP_TONES;
-
-            // Play audio directly from pre-generated buffer (codec already opened)
-            esp_codec_dev_write(spk_codec_dev, pregenerated_beeps[freq_index], AUDIO_BUFFER_SIZE * sizeof(int16_t));
+            esp_codec_dev_write(spk_codec_dev, pregenerated_beeps[freq_index],
+                                AUDIO_BUFFER_SIZE * sizeof(int16_t));
         }
     }
+}
 
-    esp_codec_dev_close(spk_codec_dev);
-    vTaskDelete(NULL);
+static void led_animation_task(void *pvParameters)
+{
+    while (1) {
+        // --- 1. Drain LED event queue (non-blocking) ---
+        led_event_t evt;
+        while (xQueueReceive(led_event_queue, &evt, 0) == pdTRUE) {
+            if (evt.type == LED_EVENT_ACTIVE && evt.channel >= 1 && evt.channel <= 4) {
+                // Accumulate energy
+                uint16_t e = channel_energy[evt.channel - 1] + 80;
+                channel_energy[evt.channel - 1] = (e > 255) ? 255 : (uint8_t)e;
+                led_matrix_set_energy(evt.channel, channel_energy[evt.channel - 1]);
+                led_matrix_show_number((int)evt.channel, evt.color);
+            } else if (evt.type == LED_EVENT_INACTIVE) {
+                led_matrix_clear();
+            }
+        }
+
+        // --- 2. Natural energy decay each frame ---
+        for (int i = 0; i < 4; i++) {
+            if (channel_energy[i] > 2) {
+                channel_energy[i] -= 2;
+                led_matrix_set_energy(i + 1, channel_energy[i]);
+            } else if (channel_energy[i] > 0) {
+                channel_energy[i] = 0;
+                led_matrix_set_energy(i + 1, 0);
+            }
+        }
+
+        // --- 3. Render one animation frame ---
+        led_matrix_update();
+        vTaskDelay(pdMS_TO_TICKS(20)); // 50 FPS
+    }
 }
 #endif
 
@@ -154,7 +214,7 @@ void app_main(void)
             return;
         }
         generate_beep_tone(pregenerated_beeps[i], AUDIO_BUFFER_SIZE, beep_frequencies[i]);
-        ESP_LOGI(TAG, "Generated beep tone %d: %"PRIu32" Hz", i, beep_frequencies[i]);
+        ESP_LOGI(TAG, "Generated beep tone %d: %" PRIu32 " Hz", i, beep_frequencies[i]);
     }
     ESP_LOGI(TAG, "All audio tones pre-generated successfully");
 
@@ -166,11 +226,23 @@ void app_main(void)
     }
 #endif
 
+    // Create LED event queue (touch callback -> animation task)
+    led_event_queue = xQueueCreate(8, sizeof(led_event_t));
+    if (led_event_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create LED event queue");
+        return;
+    }
+
+    // Initialize LED matrix
+    led_matrix_init();
+    ESP_LOGI(TAG, "LED matrix initialized on GPIO %d", LED_MATRIX_GPIO);
+
     touch_button_config_t config = {
         .channel_num = sizeof(channel_list) / sizeof(channel_list[0]),
         .channel_list = channel_list,
-        .channel_threshold = channel_threshold,
-        .debounce_times = TOUCH_DEBOUNCE_TIMES,
+        .thresholds = channel_threshold,
+        .debounce_active = TOUCH_DEBOUNCE_ACTIVE,
+        .debounce_inactive = TOUCH_DEBOUNCE_INACTIVE,
         .skip_lowlevel_init = false
     };
 
@@ -178,7 +250,7 @@ void app_main(void)
     ESP_ERROR_CHECK(touch_button_sensor_create(&config, &handle, touch_state_callback, NULL));
 
     // Create a task to handle touch button events
-    xTaskCreate(touch_button_task, "touch_button_sensor", 3072, handle, 2, NULL);
+    xTaskCreate(touch_button_task, "touch_button_sensor", 3072, handle, 4, NULL);
 
 #if CONFIG_IDF_TARGET_ESP32P4
     // Create audio playback task
@@ -186,8 +258,22 @@ void app_main(void)
     ESP_LOGI(TAG, "Audio playback task created");
 #endif
 
+    // Create LED animation task
+    xTaskCreate(led_animation_task, "led_anim", 4096, NULL, 3, NULL);
+    ESP_LOGI(TAG, "LED animation task created");
+
     // Main loop can do other things now
+    uint32_t start_time = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Main task can do other work or just idle
+        vTaskDelay(pdMS_TO_TICKS(20)); // Main task can do other work or just idle
+        start_time += 20;
+        // print touch sensor data in one line
+        for (int i = 0; i < sizeof(channel_list) / sizeof(channel_list[0]); i++) {
+            uint32_t data;
+            touch_button_sensor_get_data(handle, channel_list[i], &data);
+            // printf("Channel %" PRIu32 " data: %" PRIu32 ", threshold: %" PRIu32 "\t", channel_list[i], data, channel_threshold[i]);
+            // printf format printf("P%d,%d,%f,%f,%f")  第一个 %d 是通道，第二个是 timestamp，第三个是 data，第四个是 threshold，第五个是 energy
+            printf("P%" PRIu32 ",%" PRIu32 ",%f,%f,%f\n", channel_list[i], start_time, (float)data, (float)channel_threshold[i], (float)data - (float)channel_threshold[i]);
+        }
     }
 }

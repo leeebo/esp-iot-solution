@@ -1,21 +1,23 @@
-version: "0.2.2~1"
+version: "0.3.0"
 targets:
-  - esp32
   - esp32s2
   - esp32s3
   - esp32p4
+  - esp32h4
   - linux
-description: Touch button sensor with enhanced FSM for better anti-interference performance (Experimental)
+description: Touch button sensor with unified single-FSM multi-frequency architecture
 url: https://github.com/espressif/esp-iot-solution/tree/master/components/touch/
 repository: https://github.com/espressif/esp-iot-solution.git
 issues: https://github.com/espressif/esp-iot-solution/issues
 dependencies:
-  idf: ">=4.4,<6.0"
+  idf: ">=5.5,<=6.1"
   cmake_utilities: "0.*"
   touch_sensor_fsm:
-    version: ">=0.8.1~1,<0.8.2"
+    version: "0.9.*"
+    override_path: "/home/libo/fsm_refactor/components/touch_sensor_fsm"
   touch_sensor_lowlevel:
-    version: ">=0.9.1~1,<0.10.0"
+    version: "0.10.*"
+    override_path: "/home/libo/fsm_refactor/components/touch_sensor_lowlevel"
     public: true
 files:
   exclude:

@@ -1,121 +1,61 @@
 # Touch Button Sensor Example
 
-**Note:** This example is for developers testing only. It is not intended for production use.
+This example demonstrates how to use the `touch_button_sensor` component to implement high-performance touch button functionality on modern ESP32 series chips (optimized for ESP32-P4).
 
-This example demonstrates how to use the touch_button_sensor component to implement touch button functionality on ESP32 devices.
-
-touch_button_sensor is an pure software FSM based touch sensor driver aims to provide an more flexible and configurable touch sensor solution. And it has more strong noise immunity.
+The `touch_button_sensor` is an FSM-based touch sensor driver that provides a flexible, software-driven solution with superior noise immunity compared to traditional hardware-only methods.
 
 ## Overview
 
-The touch button sensor component provides a high-level abstraction for implementing capacitive touch buttons. It handles:
+The component provides a high-level abstraction for capacitive touch buttons, handling:
 
-- Button state detection (active/inactive)
-- Debounce filtering
-- Multiple frequency scanning for noise immunity
-- Event-based notifications
-- Configurable sensitivity and thresholds
+- **FSM-based Detection**: Reliable state changes using a single-FSM multi-frequency architecture.
+- **Absolute Thresholds**: Simple unscaled absolute value thresholds for direct sensitivity control.
+- **Fused Data Output**: Combined signal output from multiple frequencies for cleaner detection.
+- **Debounce Filtering**: Independent active and inactive debounce counts.
 
 ## Hardware Required
 
-* An ESP development board with touch sensor capability
-* Touch pads or electrodes connected to touch-enabled GPIO pins
-* A USB cable for power supply and programming
+* A supported ESP32 development board (e.g., ESP32-P4 Function EV Board).
+* Touch pads or electrodes connected to touch-enabled GPIO pins.
+* A USB cable for serial monitoring and programming.
 
 ## How to Use Example
 
-### Hardware Connection
-
-Connect touch pads/electrodes to the touch-enabled GPIO pins on your ESP board. Check your board's documentation for which pins support touch sensing.
-
 ### Configuration
 
-The example can be configured through menuconfig:
+Most behavioral parameters are now tuned directly in the application code to facilitate runtime adjustment and PC tool debugging. The component's `Kconfig` is simplified to core switches.
 
-```
-idf.py menuconfig
-```
-
-Under "Touch Button Sensor Configuration" you can adjust numerous parameters:
-
-- `TOUCH_BUTTON_SENSOR_DEBUG`: Enable debug mode for detailed logging
-- `TOUCH_BUTTON_SENSOR_CALIBRATION_TIMES`: Number of readings for initial calibration
-- `TOUCH_BUTTON_SENSOR_DEBOUNCE_INACTIVE`: Debounce count for inactive state detection
-- `TOUCH_BUTTON_SENSOR_POLLING_INTERVAL`: Interval between polling touch readings (ESP32 only)
-- `TOUCH_BUTTON_SENSOR_SMOOTH_COEF_X1000`: Smoothing coefficient for readings stability
-- `TOUCH_BUTTON_SENSOR_BASELINE_COEF_X1000`: Baseline adaptation coefficient for drift compensation
-- `TOUCH_BUTTON_SENSOR_MAX_P_X1000`: Maximum positive change ratio threshold
-- `TOUCH_BUTTON_SENSOR_MIN_N_X1000`: Minimum negative change ratio threshold
-- `TOUCH_BUTTON_SENSOR_NEGATIVE_LOGIC`: Enable negative logic for touch detection
-- `TOUCH_BUTTON_SENSOR_NOISE_P_SNR`: Signal-to-noise ratio for positive noise filtering
-- `TOUCH_BUTTON_SENSOR_NOISE_N_SNR`: Signal-to-noise ratio for negative noise filtering
-- `TOUCH_BUTTON_SENSOR_RESET_COVER`: Reset count threshold for cover detection
-- `TOUCH_BUTTON_SENSOR_RESET_CALIBRATION`: Reset count for calibration error recovery
-- `TOUCH_BUTTON_SENSOR_RAW_BUF_SIZE`: Size of raw data buffer for processing
-- `TOUCH_BUTTON_SENSOR_SCALE_FACTOR`: Scale factor for threshold calculations
+1.  **Debug Mode**: Enable `TOUCH_BUTTON_SENSOR_DEBUG` in `idf.py menuconfig` to see detailed FSM logs in CSV format.
+2.  **API Config**: Adjust parameters in `main/touch_button_sensor_main.c`:
+    - `channel_threshold`: Unscaled absolute thresholds (e.g., `200`).
+    - `debounce_active` / `debounce_inactive`: Sequential trigger counts.
 
 ### Build and Flash
 
-Build the project and flash it to the board:
-
 ```bash
+idf.py set-target esp32p4  # Or your target
 idf.py build
-idf.py -p PORT flash
+idf.py flash monitor
 ```
 
-Replace PORT with your serial port name.
+## Example Output
 
-### Example Output
+The example prints the current data and threshold for each channel in the main loop. If `DEBUG` mode is enabled, it also outputs structured CSV lines for PC plotting tools.
 
-The example will output touch sensor readings to the serial monitor:
-
-```
-I (320) TOUCH_SENSOR: IoT Touch Button Driver Version: 0.2.0
-I (330) TOUCH_SENSOR: Starting touch sensor...
-I (340) TOUCH_SENSOR: Touch channel detected: Active
-...
+```text
+Channel 1 data: 45, threshold: 200    Channel 2 data: 38, threshold: 200 ...
+Channel 1 data: 42, threshold: 200    Channel 2 data: 40, threshold: 200 ...
+I (2450) touch_button_sensor: Channel 1 is Active
+Channel 1 data: 310, threshold: 200   Channel 2 data: 41, threshold: 200 ...
 ```
 
 ## Implementation Details
 
-The example demonstrates:
-
-1. Touch button sensor initialization
-2. Configuring touch sensor thresholds and filters
-3. Setting up callback handlers for touch events
-4. Creating a dedicated task for processing touch events
-5. Processing touch state changes in the background
-
-Key configuration parameters:
-
-- `CONFIG_TOUCH_BUTTON_SENSOR_SMOOTH_COEF_X1000`: Smoothing coefficient for readings (x1000)
-- `CONFIG_TOUCH_BUTTON_SENSOR_BASELINE_COEF_X1000`: Baseline adaptation coefficient (x1000)
-- `CONFIG_TOUCH_BUTTON_SENSOR_MAX_P_X1000`: Maximum positive threshold (x1000), to avoid false positives
-- `CONFIG_TOUCH_BUTTON_SENSOR_MIN_N_X1000`: Minimum negative threshold (x1000), to avoid false negatives
-- `CONFIG_TOUCH_BUTTON_SENSOR_NOISE_P_SNR`: Signal-to-noise ratio for positive noise
-- `CONFIG_TOUCH_BUTTON_SENSOR_NOISE_N_SNR`: Signal-to-noise ratio for negative noise
-- `CONFIG_TOUCH_BUTTON_SENSOR_CALIBRATION_TIMES`: Initial calibration readings count
-
-## Troubleshooting
-
-- If touch detection is unreliable, try adjusting the threshold values
-- For noisy environments, increase the SNR values and debounce count
-- Ensure proper grounding of the touch sensor system
-- Keep touch traces short and isolated from noise sources
-- If experiencing calibration issues, adjust the calibration times or reset parameters
-
-## Tuning Tools
-
-* Enable the `Enable touch button sensor debug mode` option in menuconfig
-* Install the tptool for threshold tuning, run `pip install tptool` in the terminal
-* Run `python -m tptool` to start the tuning tool
-
-
+1.  **Initialization**: The `touch_button_config_t` is set up with channel lists and absolute thresholds.
+2.  **FSM Marriage**: The component automatically initializes the underlying `touch_sensor_fsm` and `touch_sensor_lowlevel` units.
+3.  **Event Handling**: A dedicated task calls `touch_button_sensor_handle_events()` periodically to process FSM state transitions and trigger callbacks.
+4.  **Tuning**: Use the `vl` (Value Log) output with PC tools like `tptool` to visualize raw/smooth/fused data for precise threshold adjustment.
 
 ## Additional Notes
 
-- The touch sensor is capable of detecting both brief taps and continuous touches
-- Multiple touch channels can be used simultaneously
-- Sleep mode is Not supported for low power applications
-- The dedicated task handling ensures responsive touch detection without blocking the main application
-
+- In most usage scenarios, only the threshold needs to be adjusted. If an "EMS Fail" case occurs, a debugging tool should be used to adjust the internal detailed parameters.

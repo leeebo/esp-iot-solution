@@ -44,13 +44,13 @@ void app_main(void)
 {
     buzzer_driver_install(IO_BUZZER_CTRL);
 
-    uint32_t channel_list[] = {TOUCH_PAD_NUM8, TOUCH_PAD_NUM10, TOUCH_PAD_NUM12};
-    float channel_threshold[] = {0.008f, 0.008f, 0.008f};
+    uint32_t channel_list[] = {TOUCH_PAD_NUM10};
+    float channel_threshold[] = {0.005f};
     touch_proxi_config_t config = {
-        .channel_num = 3,
+        .channel_num = 1,
         .channel_list = channel_list,
         .channel_threshold = channel_threshold,
-        .debounce_times = 2,
+        .debounce_times = 1,
         .skip_lowlevel_init = false,
     };
 

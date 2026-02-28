@@ -3,12 +3,15 @@ targets:
   - esp32s2
   - esp32s3
   - esp32p4
+  - esp32h4
   - linux
 dependencies:
   idf: ">=4.4"
   cmake_utilities: "0.*"
   touch_button_sensor:
     version: "*"
-    override_path: "../../../../components/touch/touch_button_sensor"
+    override_path: "/home/libo/prox_sensor/components/touch/touch_button_sensor"
   espressif/esp32_p4_function_ev_board:
     version: "*"
+    rules:
+      - if: "target == esp32p4"
