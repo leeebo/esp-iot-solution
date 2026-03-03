@@ -27,7 +27,7 @@ extern "C"
 #define LED_MATRIX_EFFECT_PALETTE 4 // Palette Sweep: rainbow spiral from center
 
 #ifndef LED_MATRIX_EFFECT
-#define LED_MATRIX_EFFECT LED_MATRIX_EFFECT_NOISE // Default effect
+#define LED_MATRIX_EFFECT LED_MATRIX_EFFECT_RADIAL // Default effect
 #endif
 
 /**

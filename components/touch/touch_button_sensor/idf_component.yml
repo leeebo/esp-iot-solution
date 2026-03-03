@@ -13,10 +13,10 @@ dependencies:
   idf: ">=5.5,<=6.1"
   cmake_utilities: "0.*"
   touch_sensor_fsm:
-    version: "0.9.*"
+    version: "*"
     override_path: "/home/libo/fsm_refactor/components/touch_sensor_fsm"
   touch_sensor_lowlevel:
-    version: "0.10.*"
+    version: "*"
     override_path: "/home/libo/fsm_refactor/components/touch_sensor_lowlevel"
     public: true
 files:

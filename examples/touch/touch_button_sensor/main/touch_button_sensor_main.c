@@ -25,6 +25,13 @@ uint32_t channel_threshold[] = {120, 120, 120, 120};
 static uint8_t channel_energy[4] = {0, 0, 0, 0};
 static uint32_t active_channel = 0;
 
+// Minimum display duration for the number (ms)
+#define NUMBER_HOLD_MS 1200
+// Timestamp (xTaskGetTickCount in ms) after which number may be cleared
+static uint32_t number_hold_until_ms = 0;
+// Which channel is currently being displayed (0 = none)
+static uint32_t displayed_channel = 0;
+
 // LED event queue — callback sends events, anim task processes them
 typedef enum {
     LED_EVENT_ACTIVE,
@@ -159,18 +166,44 @@ static void audio_play_task(void *pvParameters)
 static void led_animation_task(void *pvParameters)
 {
     while (1) {
+        uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
         // --- 1. Drain LED event queue (non-blocking) ---
         led_event_t evt;
         while (xQueueReceive(led_event_queue, &evt, 0) == pdTRUE) {
             if (evt.type == LED_EVENT_ACTIVE && evt.channel >= 1 && evt.channel <= 4) {
-                // Accumulate energy
+                if (evt.channel != displayed_channel) {
+                    // Different key: clear screen and reset ALL channel energies immediately
+                    led_matrix_clear();
+                    for (int i = 0; i < 4; i++) {
+                        channel_energy[i] = 0;
+                        led_matrix_set_energy(i + 1, 0);
+                    }
+                    displayed_channel = evt.channel;
+                    number_hold_until_ms = 0; // will be set below
+                }
+                // Same key (or just switched): accumulate energy and refresh display
                 uint16_t e = channel_energy[evt.channel - 1] + 80;
                 channel_energy[evt.channel - 1] = (e > 255) ? 255 : (uint8_t)e;
                 led_matrix_set_energy(evt.channel, channel_energy[evt.channel - 1]);
                 led_matrix_show_number((int)evt.channel, evt.color);
+                // Extend (or set) the hold window — only same-key repeats get full effect
+                number_hold_until_ms = now_ms + NUMBER_HOLD_MS;
             } else if (evt.type == LED_EVENT_INACTIVE) {
-                led_matrix_clear();
+                // Only clear if the hold period has already expired
+                if ((int32_t)(now_ms - number_hold_until_ms) >= 0) {
+                    led_matrix_clear();
+                    displayed_channel = 0;
+                }
+                // else: silently drop — the hold-expiry below will clear later
             }
+        }
+
+        // --- 1b. Auto-clear once hold period expires ---
+        if (number_hold_until_ms != 0 && (int32_t)(now_ms - number_hold_until_ms) >= 0) {
+            led_matrix_clear();
+            number_hold_until_ms = 0;
+            displayed_channel = 0;
         }
 
         // --- 2. Natural energy decay each frame ---
@@ -273,7 +306,7 @@ void app_main(void)
             touch_button_sensor_get_data(handle, channel_list[i], &data);
             // printf("Channel %" PRIu32 " data: %" PRIu32 ", threshold: %" PRIu32 "\t", channel_list[i], data, channel_threshold[i]);
             // printf format printf("P%d,%d,%f,%f,%f")  第一个 %d 是通道，第二个是 timestamp，第三个是 data，第四个是 threshold，第五个是 energy
-            printf("P%" PRIu32 ",%" PRIu32 ",%f,%f,%f\n", channel_list[i], start_time, (float)data, (float)channel_threshold[i], (float)data - (float)channel_threshold[i]);
+            // printf("P%" PRIu32 ",%" PRIu32 ",%f,%f,%f\n", channel_list[i], start_time, (float)data, (float)channel_threshold[i], (float)data - (float)channel_threshold[i]);
         }
     }
 }
