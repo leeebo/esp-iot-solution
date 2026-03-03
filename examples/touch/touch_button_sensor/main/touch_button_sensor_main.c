@@ -9,8 +9,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "protocol_examples_common.h"
 #include "touch_button_sensor.h"
 #include "led_matrix.h"
+#include "mcp_server_init.h"
 
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "bsp/esp32_p4_function_ev_board.h"
@@ -63,6 +69,10 @@ static const uint32_t beep_frequencies[] = {880, 988, 1047, 1319}; // A5, B5, C6
 // Pre-generated audio buffers for each frequency
 static int16_t *pregenerated_beeps[NUM_BEEP_TONES] = {NULL};
 
+// Forward declarations for MCP server to call
+void audio_play_beep(int tone_index);
+void audio_set_volume(int volume);
+
 // Generate a beep tone with the specified frequency (stereo)
 static void generate_beep_tone(int16_t *buffer, size_t samples, uint32_t frequency)
 {
@@ -92,6 +102,9 @@ static void touch_state_callback(touch_button_handle_t handle, uint32_t channel,
         active_channel = channel;
         ESP_LOGI(TAG, "Channel %" PRIu32 " is Active", channel);
 
+        // Update MCP server button state
+        mcp_server_update_button_state((int)channel, true);
+
 #if CONFIG_IDF_TARGET_ESP32P4
         if (audio_event_queue != NULL) {
             xQueueSend(audio_event_queue, &channel, 0);
@@ -111,6 +124,9 @@ static void touch_state_callback(touch_button_handle_t handle, uint32_t channel,
             active_channel = 0;
         }
         ESP_LOGI(TAG, "Channel %" PRIu32 " is Inactive", channel);
+
+        // Update MCP server button state
+        mcp_server_update_button_state((int)channel, false);
 
         if (led_event_queue != NULL) {
             led_event_t evt = {
@@ -160,6 +176,23 @@ static void audio_play_task(void *pvParameters)
             esp_codec_dev_write(spk_codec_dev, pregenerated_beeps[freq_index],
                                 AUDIO_BUFFER_SIZE * sizeof(int16_t));
         }
+    }
+}
+
+// Functions for MCP server to call
+void audio_play_beep(int tone_index)
+{
+    if (tone_index >= 0 && tone_index < NUM_BEEP_TONES && audio_event_queue != NULL) {
+        uint32_t channel = tone_index + 1;
+        xQueueSend(audio_event_queue, &channel, 0);
+    }
+}
+
+void audio_set_volume(int volume)
+{
+    if (spk_codec_dev != NULL && volume >= 0 && volume <= 100) {
+        esp_codec_dev_set_out_vol(spk_codec_dev, volume);
+        ESP_LOGI(TAG, "Volume set to %d", volume);
     }
 }
 
@@ -226,6 +259,23 @@ static void led_animation_task(void *pvParameters)
 
 void app_main(void)
 {
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialize networking stack
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Connect to WiFi (uses protocol_examples_common)
+    ESP_LOGI(TAG, "Connecting to WiFi...");
+    ESP_ERROR_CHECK(example_connect());
+    ESP_LOGI(TAG, "WiFi connected!");
+
 #if CONFIG_IDF_TARGET_ESP32P4
     // Initialize ESP32-P4 EV Board BSP
     ESP_LOGI(TAG, "Initializing ESP32-P4 Function EV Board BSP");
@@ -294,6 +344,14 @@ void app_main(void)
     // Create LED animation task
     xTaskCreate(led_animation_task, "led_anim", 4096, NULL, 3, NULL);
     ESP_LOGI(TAG, "LED animation task created");
+
+    // Initialize MCP Server
+    ret = mcp_server_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize MCP server: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "MCP Server initialized successfully");
+    }
 
     // Main loop can do other things now
     uint32_t start_time = 0;

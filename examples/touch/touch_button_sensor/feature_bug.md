@@ -1,16 +1,12 @@
-## 需求
+## 通过 MCP 对接端侧设备需求
 
-1. 目前我在 GPIO22 上链接了一个 WS2812 灯珠矩阵，顺序排布和原理图如下，请先理解这个硬件设计，以及控制方法
-
-![alt text](image.png)
-
-![alt text](image-1.png)
-
-2. 请调查 FastLED 库是否可以在当前 ESP-IDF 工程下适用，如果可以，请作为 submodule 用于控制 esp32p4 的 ws2812 灯珠矩阵，https://github.com/FastLED/FastLED
-3. 我需要在触摸按键时，通过 ws2812 灯珠矩阵显示不同的数字和颜色
+1. 基于当前工程，添加 WiFi 上网支持（目前 target 是 P4，已经挂在了一个 C6 的模块，可以支持 WiFi）
+2. 添加 MCP Server ，将硬件的功能原子化 ，例如 LED 矩阵的显示，音频的播放，按键的状态。支持 cursor，claude desktop 等对接，给出详细方案（包括 claude desktop 的对接方案）
+3. 未来 cursor 这些工具可以接入 MCP Server，通过控制硬件给我发送状态通知（例如编程完成时，给我一个 LED 矩阵的显示，和音频的播放。需要我批准时候，给我另外一种显示，表示我需要批准）
 
 ## 自主迭代
 
 * IDF_PATH 为 /home/libo/esp/gitlab_release_v5_5
 * target 为 esp32p4，当前端口是 /dev/ttyACM0
+* 测试 WiFi SSID HAPPYBOY, 密码 43539100
 

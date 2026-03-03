@@ -58,6 +58,20 @@ void led_matrix_set_energy(int channel, uint8_t energy);
  */
 void led_matrix_update(void);
 
+/**
+ * @brief Fill the entire LED matrix with a solid color
+ *
+ * @param color_hex Hex color (e.g. 0xFF0000 for red)
+ */
+void led_matrix_fill_color(uint32_t color_hex);
+
+/**
+ * @brief Set the global brightness of the LED matrix
+ *
+ * @param brightness Brightness value (0-255)
+ */
+void led_matrix_set_brightness(uint8_t brightness);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,7 +6,7 @@ targets:
   - esp32h4
   - linux
 dependencies:
-  idf: ">=4.4"
+  idf: ">=5.4.0"
   cmake_utilities: "0.*"
   touch_button_sensor:
     version: "*"
@@ -15,3 +15,18 @@ dependencies:
     version: "*"
     rules:
       - if: "target == esp32p4"
+  espressif/esp_wifi_remote:
+    version: ">=0.4.3"
+    rules:
+      - if: "target == esp32p4"
+  espressif/esp_hosted:
+    version: ">=0.0.34"
+    rules:
+      - if: "target == esp32p4"
+  protocol_examples_common:
+    path: "${IDF_PATH}/examples/common_components/protocol_examples_common"
+  mcp-c-sdk:
+    version: "*"
+    override_path: "/home/libo/mcp_vide_coding/components/mcp-c-sdk"
+  espressif/mdns:
+    version: "*"

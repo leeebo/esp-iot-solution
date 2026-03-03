@@ -233,3 +233,17 @@ void led_matrix_clear(void)
         channel_energy[i] = 0;
     }
 }
+
+void led_matrix_fill_color(uint32_t color_hex)
+{
+    CRGB color = color_hex;
+    for (int i = 0; i < NUM_LEDS; i++) {
+        leds[i] = color;
+    }
+    FastLED.show();
+}
+
+void led_matrix_set_brightness(uint8_t brightness)
+{
+    FastLED.setBrightness(brightness);
+}
