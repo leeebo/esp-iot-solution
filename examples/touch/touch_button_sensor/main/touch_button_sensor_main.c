@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <stdio.h>
+#include <string.h>
 #include <inttypes.h>
 #include <math.h>
 #include "freertos/FreeRTOS.h"
@@ -179,6 +180,22 @@ static void audio_play_task(void *pvParameters)
     }
 }
 
+// Audio event types for the queue
+typedef enum {
+    AUDIO_EVENT_BEEP,
+    AUDIO_EVENT_FREQ,
+    AUDIO_EVENT_STOP,
+} audio_event_type_t;
+
+typedef struct {
+    audio_event_type_t type;
+    uint32_t param1;  // tone_index for BEEP, frequency for FREQ
+    uint32_t param2;  // duration_ms for FREQ
+} audio_event_msg_t;
+
+static QueueHandle_t audio_cmd_queue = NULL;
+static volatile bool s_audio_stop_flag = false;
+
 // Functions for MCP server to call
 void audio_play_beep(int tone_index)
 {
@@ -194,6 +211,133 @@ void audio_set_volume(int volume)
         esp_codec_dev_set_out_vol(spk_codec_dev, volume);
         ESP_LOGI(TAG, "Volume set to %d", volume);
     }
+}
+
+void audio_play_frequency(uint32_t freq, uint32_t duration_ms)
+{
+    if (freq < 20 || freq > 20000 || duration_ms == 0) {
+        return;
+    }
+
+    size_t samples = (AUDIO_SAMPLE_RATE * duration_ms / 1000) * AUDIO_CHANNELS;
+    int16_t *buffer = (int16_t *)malloc(samples * sizeof(int16_t));
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate buffer for frequency playback");
+        return;
+    }
+
+    for (size_t i = 0; i < samples / AUDIO_CHANNELS; i++) {
+        float t = (float)i / AUDIO_SAMPLE_RATE;
+        float envelope = 1.0f;
+        size_t mono_samples = samples / AUDIO_CHANNELS;
+        if (i < mono_samples / 20) {
+            envelope = (float)i / (mono_samples / 20);
+        } else if (i > mono_samples * 19 / 20) {
+            envelope = (float)(mono_samples - i) / (mono_samples / 20);
+        }
+        int16_t sample_value = (int16_t)(sin(2.0f * M_PI * freq * t) * 16000.0f * envelope);
+        buffer[i * 2] = sample_value;
+        buffer[i * 2 + 1] = sample_value;
+    }
+
+    if (spk_codec_dev) {
+        esp_codec_dev_write(spk_codec_dev, buffer, samples * sizeof(int16_t));
+    }
+    free(buffer);
+}
+
+// Note name to frequency conversion
+static uint32_t note_to_freq(const char *note)
+{
+    static const struct {
+        const char *name;
+        uint32_t freq;
+    } notes[] = {
+        {"C3", 131}, {"D3", 147}, {"E3", 165}, {"F3", 175}, {"G3", 196}, {"A3", 220}, {"B3", 247},
+        {"C4", 262}, {"D4", 294}, {"E4", 330}, {"F4", 349}, {"G4", 392}, {"A4", 440}, {"B4", 494},
+        {"C5", 523}, {"D5", 587}, {"E5", 659}, {"F5", 698}, {"G5", 784}, {"A5", 880}, {"B5", 988},
+        {"C6", 1047}, {"D6", 1175}, {"E6", 1319},
+    };
+    for (int i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+        if (strcmp(notes[i].name, note) == 0) {
+            return notes[i].freq;
+        }
+    }
+    return 0;
+}
+
+void audio_play_note(const char *note, uint32_t duration_ms)
+{
+    uint32_t freq = note_to_freq(note);
+    if (freq > 0) {
+        audio_play_frequency(freq, duration_ms);
+    }
+}
+
+void audio_stop(void)
+{
+    s_audio_stop_flag = true;
+}
+
+// Preset sounds
+typedef struct {
+    const char *name;
+    const uint16_t *freqs;
+    const uint16_t *durations;
+    int count;
+} preset_sound_t;
+
+static const uint16_t snd_success_f[] = {523, 659, 784};
+static const uint16_t snd_success_d[] = {150, 150, 300};
+static const uint16_t snd_error_f[] = {784, 392};
+static const uint16_t snd_error_d[] = {200, 400};
+static const uint16_t snd_warning_f[] = {880, 880, 880};
+static const uint16_t snd_warning_d[] = {100, 100, 100};
+static const uint16_t snd_notification_f[] = {1047, 784};
+static const uint16_t snd_notification_d[] = {100, 200};
+static const uint16_t snd_click_f[] = {1000};
+static const uint16_t snd_click_d[] = {50};
+static const uint16_t snd_startup_f[] = {262, 330, 392, 523};
+static const uint16_t snd_startup_d[] = {150, 150, 150, 300};
+static const uint16_t snd_shutdown_f[] = {523, 392, 330, 262};
+static const uint16_t snd_shutdown_d[] = {150, 150, 150, 300};
+static const uint16_t snd_alert_f[] = {880, 988, 880, 988};
+static const uint16_t snd_alert_d[] = {150, 150, 150, 150};
+static const uint16_t snd_confirm_f[] = {784, 784, 1047};
+static const uint16_t snd_confirm_d[] = {100, 100, 300};
+static const uint16_t snd_cancel_f[] = {523};
+static const uint16_t snd_cancel_d[] = {400};
+
+static const preset_sound_t preset_sounds[] = {
+    {"success", snd_success_f, snd_success_d, 3},
+    {"error", snd_error_f, snd_error_d, 2},
+    {"warning", snd_warning_f, snd_warning_d, 3},
+    {"notification", snd_notification_f, snd_notification_d, 2},
+    {"click", snd_click_f, snd_click_d, 1},
+    {"startup", snd_startup_f, snd_startup_d, 4},
+    {"shutdown", snd_shutdown_f, snd_shutdown_d, 4},
+    {"alert", snd_alert_f, snd_alert_d, 4},
+    {"confirm", snd_confirm_f, snd_confirm_d, 3},
+    {"cancel", snd_cancel_f, snd_cancel_d, 1},
+};
+
+void audio_play_sound(const char *name)
+{
+    s_audio_stop_flag = false;
+    for (int i = 0; i < sizeof(preset_sounds) / sizeof(preset_sounds[0]); i++) {
+        if (strcmp(preset_sounds[i].name, name) == 0) {
+            for (int j = 0; j < preset_sounds[i].count && !s_audio_stop_flag; j++) {
+                audio_play_frequency(preset_sounds[i].freqs[j], preset_sounds[i].durations[j]);
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            break;
+        }
+    }
+}
+
+void audio_play_melody(const char *name)
+{
+    audio_play_sound(name);
 }
 
 static void led_animation_task(void *pvParameters)
