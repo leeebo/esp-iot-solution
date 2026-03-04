@@ -37,8 +37,18 @@ extern void audio_set_volume(int volume);
 extern void audio_play_frequency(uint32_t freq, uint32_t duration_ms);
 extern void audio_play_note(const char *note, uint32_t duration_ms);
 extern void audio_play_sound(const char *name);
-extern void audio_play_melody(const char *name);
 extern void audio_stop(void);
+
+// Servo control functions
+extern void servo_set_angle(int angle);
+extern void servo_sweep(int from_angle, int to_angle, int step_delay_ms);
+extern int servo_get_angle(void);
+
+// MCP notification timeout control
+extern void mcp_notification_set_timeout(void);
+extern void mcp_notification_set_icon(const char *icon, uint32_t color);
+extern void mcp_notification_clear(void);
+extern bool mcp_notification_is_active(void);
 
 void mcp_server_update_button_state(int channel, bool active)
 {
@@ -117,6 +127,7 @@ static esp_mcp_value_t led_clear_callback(const esp_mcp_property_list_t *propert
 {
     ESP_LOGI(TAG, "led.clear called");
     led_matrix_clear();
+    mcp_notification_clear();  // Also clear any notification timeout
     return esp_mcp_value_create_bool(true);
 }
 
@@ -227,6 +238,8 @@ static esp_mcp_value_t led_show_icon_callback(const esp_mcp_property_list_t *pro
     ESP_LOGI(TAG, "led.show_icon: %s, color: 0x%06" PRIx32, icon ? icon : "null", color);
     if (icon) {
         led_matrix_show_icon(icon, color);
+        mcp_notification_set_icon(icon, color);  // Save icon state for restoration
+        mcp_notification_set_timeout();  // Set 5-minute timeout, clear on button press
     }
     return esp_mcp_value_create_bool(true);
 }
@@ -427,16 +440,6 @@ static esp_mcp_value_t audio_play_sound_callback(const esp_mcp_property_list_t *
     return esp_mcp_value_create_bool(true);
 }
 
-static esp_mcp_value_t audio_play_melody_callback(const esp_mcp_property_list_t *properties)
-{
-    const char *name = esp_mcp_property_list_get_property_string(properties, "name");
-    ESP_LOGI(TAG, "audio.play_melody: %s", name ? name : "null");
-    if (name) {
-        audio_play_melody(name);
-    }
-    return esp_mcp_value_create_bool(true);
-}
-
 // ---- NEW Audio Fine-grained Tools ----
 
 static esp_mcp_value_t audio_play_freq_callback(const esp_mcp_property_list_t *properties)
@@ -500,6 +503,89 @@ static esp_mcp_value_t audio_stop_callback(const esp_mcp_property_list_t *proper
     audio_stop();
     return esp_mcp_value_create_bool(true);
 }
+
+// Servo control callbacks
+static esp_mcp_value_t servo_set_angle_callback(const esp_mcp_property_list_t *properties)
+{
+    int angle = esp_mcp_property_list_get_property_int(properties, "angle");
+
+    if (angle < 0) {
+        angle = 0;
+    }
+    if (angle > 180) {
+        angle = 180;
+    }
+
+    ESP_LOGI(TAG, "servo_set_angle called: angle=%d", angle);
+    servo_set_angle(angle);
+
+    char result[64];
+    snprintf(result, sizeof(result), "{\"angle\":%d}", angle);
+    return esp_mcp_value_create_string(result);
+}
+
+static esp_mcp_value_t servo_sweep_callback(const esp_mcp_property_list_t *properties)
+{
+    int from_angle = esp_mcp_property_list_get_property_int(properties, "from_angle");
+    int to_angle = esp_mcp_property_list_get_property_int(properties, "to_angle");
+    int step_delay_ms = esp_mcp_property_list_get_property_int(properties, "step_delay_ms");
+
+    if (step_delay_ms < 5) {
+        step_delay_ms = 15;
+    }
+
+    ESP_LOGI(TAG, "servo_sweep called: from=%d, to=%d, delay=%dms", from_angle, to_angle, step_delay_ms);
+    servo_sweep(from_angle, to_angle, step_delay_ms);
+
+    char result[64];
+    snprintf(result, sizeof(result), "{\"from\":%d,\"to\":%d}", from_angle, to_angle);
+    return esp_mcp_value_create_string(result);
+}
+
+// === Notification preset tools ===
+// These combine LED + audio + servo into single semantic actions
+
+static esp_mcp_value_t notify_success_callback(const esp_mcp_property_list_t *properties)
+{
+    ESP_LOGI(TAG, "notify_success called");
+    led_matrix_show_icon("check", 0x00FF00);  // Green check
+    mcp_notification_set_icon("check", 0x00FF00);
+    mcp_notification_set_timeout();
+    audio_play_sound("success");
+    return esp_mcp_value_create_bool(true);
+}
+
+static esp_mcp_value_t notify_error_callback(const esp_mcp_property_list_t *properties)
+{
+    ESP_LOGI(TAG, "notify_error called");
+    led_matrix_show_icon("cross", 0xFF0000);  // Red cross
+    mcp_notification_set_icon("cross", 0xFF0000);
+    mcp_notification_set_timeout();
+    audio_play_sound("error");
+    servo_sweep(60, 120, 15);  // Shake head
+    return esp_mcp_value_create_bool(true);
+}
+
+static esp_mcp_value_t notify_waiting_callback(const esp_mcp_property_list_t *properties)
+{
+    ESP_LOGI(TAG, "notify_waiting called");
+    led_matrix_show_icon("bell", 0xFFC800);  // Yellow bell
+    mcp_notification_set_icon("bell", 0xFFC800);
+    mcp_notification_set_timeout();
+    audio_play_sound("notification");
+    servo_sweep(70, 110, 20);  // Nod
+    return esp_mcp_value_create_bool(true);
+}
+
+static esp_mcp_value_t servo_get_angle_callback(const esp_mcp_property_list_t *properties)
+{
+    int angle = servo_get_angle();
+    ESP_LOGI(TAG, "servo_get_angle called: current=%d", angle);
+
+    char result[64];
+    snprintf(result, sizeof(result), "{\"angle\":%d}", angle);
+    return esp_mcp_value_create_string(result);
+}
 #endif
 
 static esp_err_t register_mcp_tools(void)
@@ -507,13 +593,13 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_t *tool = NULL;
     esp_mcp_property_t *prop = NULL;
 
-    tool = esp_mcp_tool_create("device.get_status",
+    tool = esp_mcp_tool_create("device_get_status",
                                "Get device status including button states, volume, and LED effect",
                                device_get_status_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create device.get_status tool");
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.show_number",
+    tool = esp_mcp_tool_create("led_show_number",
                                "Display a number (0-9) on the 8x8 LED matrix with specified RGB color",
                                led_show_number_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create led.show_number tool");
@@ -523,7 +609,7 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.set_color",
+    tool = esp_mcp_tool_create("led_set_color",
                                "Fill the entire LED matrix with a solid RGB color",
                                led_set_color_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create led.set_color tool");
@@ -535,13 +621,13 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.clear",
+    tool = esp_mcp_tool_create("led_clear",
                                "Clear the LED matrix display",
                                led_clear_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create led.clear tool");
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.set_brightness",
+    tool = esp_mcp_tool_create("led_set_brightness",
                                "Set LED matrix global brightness (0-255)",
                                led_set_brightness_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create led.set_brightness tool");
@@ -550,7 +636,7 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_add_tool(s_mcp, tool);
 
 #if CONFIG_IDF_TARGET_ESP32P4
-    tool = esp_mcp_tool_create("audio.play_tone",
+    tool = esp_mcp_tool_create("audio_play_tone",
                                "Play a beep tone (1-4 for different frequencies: 880Hz, 988Hz, 1047Hz, 1319Hz)",
                                audio_play_tone_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create audio.play_tone tool");
@@ -558,7 +644,7 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("audio.set_volume",
+    tool = esp_mcp_tool_create("audio_set_volume",
                                "Set audio speaker volume (0-100)",
                                audio_set_volume_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create audio.set_volume tool");
@@ -567,35 +653,39 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_add_tool(s_mcp, tool);
 #endif
 
-    tool = esp_mcp_tool_create("button.get_state",
+    tool = esp_mcp_tool_create("button_get_state",
                                "Get the current state of all 4 touch buttons",
                                button_get_state_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_FAIL, TAG, "Failed to create button.get_state tool");
     esp_mcp_add_tool(s_mcp, tool);
 
     // LED Preset Tools
-    tool = esp_mcp_tool_create("led.show_char", "Display a character (0-9, A-Z) on LED matrix", led_show_char_callback);
+    tool = esp_mcp_tool_create("led_show_char", "Display a character (0-9, A-Z) on LED matrix", led_show_char_callback);
     prop = esp_mcp_property_create("char", ESP_MCP_PROPERTY_TYPE_STRING);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_object("color", "{\"r\":0,\"g\":255,\"b\":0}");
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.show_icon", "Display icon (check/cross/heart/star/smile/sad/arrow_up/down/left/right/play/pause/stop/power/wifi/bluetooth/bell/sun/moon/music/lock/unlock/home/gear)", led_show_icon_callback);
+    tool = esp_mcp_tool_create("led_show_icon",
+                               "Display icon on LED matrix. AUTO-USE: Show 'gear'(blue) when starting work, "
+                               "'check'(green) on success, 'cross'(red) on error, 'bell'(yellow) when need user input. "
+                               "Icons: check/cross/heart/star/smile/sad/arrow_up/down/left/right/play/pause/stop/power/wifi/bluetooth/bell/sun/moon/music/lock/unlock/home/gear",
+                               led_show_icon_callback);
     prop = esp_mcp_property_create("icon", ESP_MCP_PROPERTY_TYPE_STRING);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_object("color", "{\"r\":0,\"g\":255,\"b\":0}");
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.show_progress", "Display progress bar (0-100%) on LED matrix", led_show_progress_callback);
+    tool = esp_mcp_tool_create("led_show_progress", "Display progress bar (0-100%) on LED matrix", led_show_progress_callback);
     prop = esp_mcp_property_create_with_range("percent", 0, 100);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_object("color", "{\"r\":0,\"g\":255,\"b\":0}");
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.scroll_text", "Scroll text across LED matrix", led_scroll_text_callback);
+    tool = esp_mcp_tool_create("led_scroll_text", "Scroll text across LED matrix", led_scroll_text_callback);
     prop = esp_mcp_property_create("text", ESP_MCP_PROPERTY_TYPE_STRING);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_range("speed", 50, 500);
@@ -604,11 +694,11 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.stop_scroll", "Stop scrolling text", led_stop_scroll_callback);
+    tool = esp_mcp_tool_create("led_stop_scroll", "Stop scrolling text", led_stop_scroll_callback);
     esp_mcp_add_tool(s_mcp, tool);
 
     // LED Fine-grained Tools
-    tool = esp_mcp_tool_create("led.set_pixel", "Set single pixel color at (x,y)", led_set_pixel_callback);
+    tool = esp_mcp_tool_create("led_set_pixel", "Set single pixel color at (x,y)", led_set_pixel_callback);
     prop = esp_mcp_property_create_with_range("x", 0, 7);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_range("y", 0, 7);
@@ -621,17 +711,17 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.set_pixels", "Set multiple pixels [{x,y,r,g,b},...]", led_set_pixels_callback);
+    tool = esp_mcp_tool_create("led_set_pixels", "Set multiple pixels [{x,y,r,g,b},...]", led_set_pixels_callback);
     prop = esp_mcp_property_create("pixels", ESP_MCP_PROPERTY_TYPE_OBJECT);
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.set_bitmap", "Set all 64 pixels [[r,g,b],...]", led_set_bitmap_callback);
+    tool = esp_mcp_tool_create("led_set_bitmap", "Set all 64 pixels [[r,g,b],...]", led_set_bitmap_callback);
     prop = esp_mcp_property_create("data", ESP_MCP_PROPERTY_TYPE_OBJECT);
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.draw_line", "Draw line from (x0,y0) to (x1,y1)", led_draw_line_callback);
+    tool = esp_mcp_tool_create("led_draw_line", "Draw line from (x0,y0) to (x1,y1)", led_draw_line_callback);
     prop = esp_mcp_property_create_with_range("x0", 0, 7);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_range("y0", 0, 7);
@@ -648,7 +738,7 @@ static esp_err_t register_mcp_tools(void)
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("led.draw_rect", "Draw rectangle at (x,y) with size w*h", led_draw_rect_callback);
+    tool = esp_mcp_tool_create("led_draw_rect", "Draw rectangle at (x,y) with size w*h", led_draw_rect_callback);
     prop = esp_mcp_property_create_with_range("x", 0, 7);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_range("y", 0, 7);
@@ -669,32 +759,78 @@ static esp_err_t register_mcp_tools(void)
 
 #if CONFIG_IDF_TARGET_ESP32P4
     // Audio Preset Tools
-    tool = esp_mcp_tool_create("audio.play_sound", "Play preset sound (success/error/warning/notification/click/startup/shutdown/alert/confirm/cancel)", audio_play_sound_callback);
+    tool = esp_mcp_tool_create("audio_play_sound",
+                               "Play sound effect. AUTO-USE: 'click' when starting, 'success' on completion, "
+                               "'error' on failure, 'notification' when need user input, 'warning' for attention. "
+                               "Sounds: success/error/warning/notification/click/startup/shutdown/alert/confirm/cancel",
+                               audio_play_sound_callback);
     prop = esp_mcp_property_create("name", ESP_MCP_PROPERTY_TYPE_STRING);
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
     // Audio Fine-grained Tools
-    tool = esp_mcp_tool_create("audio.play_freq", "Play frequency (20-20000 Hz) for duration_ms", audio_play_freq_callback);
+    tool = esp_mcp_tool_create("audio_play_freq", "Play frequency (20-20000 Hz) for duration_ms", audio_play_freq_callback);
     prop = esp_mcp_property_create_with_range("freq", 20, 20000);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_range("duration_ms", 50, 5000);
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("audio.play_note", "Play musical note (C3-C6) for duration_ms", audio_play_note_callback);
+    tool = esp_mcp_tool_create("audio_play_note", "Play musical note (C3-C6) for duration_ms", audio_play_note_callback);
     prop = esp_mcp_property_create("note", ESP_MCP_PROPERTY_TYPE_STRING);
     esp_mcp_tool_add_property(tool, prop);
     prop = esp_mcp_property_create_with_range("duration_ms", 50, 5000);
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("audio.play_sequence", "Play sequence of notes [{note,duration_ms},...]", audio_play_sequence_callback);
+    tool = esp_mcp_tool_create("audio_play_sequence", "Play sequence of notes [{note,duration_ms},...]", audio_play_sequence_callback);
     prop = esp_mcp_property_create("notes", ESP_MCP_PROPERTY_TYPE_OBJECT);
     esp_mcp_tool_add_property(tool, prop);
     esp_mcp_add_tool(s_mcp, tool);
 
-    tool = esp_mcp_tool_create("audio.stop", "Stop audio playback", audio_stop_callback);
+    tool = esp_mcp_tool_create("audio_stop", "Stop audio playback", audio_stop_callback);
+    esp_mcp_add_tool(s_mcp, tool);
+
+    // Servo control tools
+    tool = esp_mcp_tool_create("servo_set_angle", "Set servo motor angle (0-180 degrees)", servo_set_angle_callback);
+    prop = esp_mcp_property_create_with_range("angle", 0, 180);
+    esp_mcp_tool_add_property(tool, prop);
+    esp_mcp_add_tool(s_mcp, tool);
+
+    tool = esp_mcp_tool_create("servo_sweep",
+                               "Sweep servo motor. AUTO-USE: sweep(60,120) as 'shake head' on error, "
+                               "sweep(70,110) as 'nod' when need user input",
+                               servo_sweep_callback);
+    prop = esp_mcp_property_create_with_range("from_angle", 0, 180);
+    esp_mcp_tool_add_property(tool, prop);
+    prop = esp_mcp_property_create_with_range("to_angle", 0, 180);
+    esp_mcp_tool_add_property(tool, prop);
+    prop = esp_mcp_property_create_with_range("step_delay_ms", 5, 100);
+    esp_mcp_tool_add_property(tool, prop);
+    esp_mcp_add_tool(s_mcp, tool);
+
+    tool = esp_mcp_tool_create("servo_get_angle", "Get current servo angle", servo_get_angle_callback);
+    esp_mcp_add_tool(s_mcp, tool);
+
+    // === Notification preset tools ===
+    // Single-call tools that combine LED + audio + servo for common scenarios
+
+    tool = esp_mcp_tool_create("notify_success",
+                               "Notify task completed successfully. Shows green checkmark + success sound. "
+                               "USE: When build/compile succeeds, task finishes, user request completed.",
+                               notify_success_callback);
+    esp_mcp_add_tool(s_mcp, tool);
+
+    tool = esp_mcp_tool_create("notify_error",
+                               "Notify error or failure occurred. Shows red X + error sound + shake head. "
+                               "USE: When build fails, command fails, cannot complete request.",
+                               notify_error_callback);
+    esp_mcp_add_tool(s_mcp, tool);
+
+    tool = esp_mcp_tool_create("notify_waiting",
+                               "Notify waiting for user input. Shows yellow bell + notification sound + nod. "
+                               "USE: When need user decision, asking question, waiting for confirmation.",
+                               notify_waiting_callback);
     esp_mcp_add_tool(s_mcp, tool);
 #endif
 

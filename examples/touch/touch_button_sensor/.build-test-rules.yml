@@ -1,0 +1,8 @@
+# Documentation: .gitlab/ci/README.md#manifest-file-to-control-the-buildtest-apps
+
+examples/touch/touch_button_sensor:
+  enable:
+    - if: IDF_TARGET == "esp32p4"
+      reason: This example requires ESP32-P4 specific peripherals (touch sensor, audio codec, LED matrix)
+  depends_components:
+    - esp_mcp

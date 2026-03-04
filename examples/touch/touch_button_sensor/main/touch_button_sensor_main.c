@@ -22,6 +22,8 @@
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "bsp/esp32_p4_function_ev_board.h"
 #include "esp_codec_dev.h"
+#include "driver/ledc.h"
+#include "driver/gpio.h"
 #endif
 
 uint32_t channel_list[] = {1, 2, 3, 4}; // gpio 9, 11, 13
@@ -38,6 +40,25 @@ static uint32_t active_channel = 0;
 static uint32_t number_hold_until_ms = 0;
 // Which channel is currently being displayed (0 = none)
 static uint32_t displayed_channel = 0;
+
+// MCP notification display timeout (5 minutes)
+#define MCP_NOTIFICATION_TIMEOUT_MS (5 * 60 * 1000)
+// MCP notification dim delay (5 seconds after show, reduce brightness)
+#define MCP_NOTIFICATION_DIM_DELAY_MS (5 * 1000)
+// Brightness levels for notification
+#define MCP_NOTIFICATION_FULL_BRIGHTNESS 40
+#define MCP_NOTIFICATION_DIM_BRIGHTNESS 8
+// Timestamp when MCP notification should auto-clear (0 = no notification)
+static volatile uint32_t mcp_notification_clear_time = 0;
+// Timestamp when MCP notification should dim (0 = already dimmed or no notification)
+static volatile uint32_t mcp_notification_dim_time = 0;
+// Flag to request immediate notification clear (set by button press)
+static volatile bool mcp_notification_clear_requested = false;
+// Current MCP icon state for restoration after touch events
+static char mcp_current_icon[32] = {0};
+static uint32_t mcp_current_icon_color = 0;
+// IO0 button GPIO
+#define BUTTON_IO0_GPIO 0
 
 // LED event queue — callback sends events, anim task processes them
 typedef enum {
@@ -70,6 +91,20 @@ static const uint32_t beep_frequencies[] = {880, 988, 1047, 1319}; // A5, B5, C6
 // Pre-generated audio buffers for each frequency
 static int16_t *pregenerated_beeps[NUM_BEEP_TONES] = {NULL};
 
+// Servo configuration
+#define SERVO_GPIO              21
+#define SERVO_LEDC_TIMER        LEDC_TIMER_1
+#define SERVO_LEDC_CHANNEL      LEDC_CHANNEL_1
+#define SERVO_LEDC_SPEED_MODE   LEDC_LOW_SPEED_MODE
+#define SERVO_FREQ_HZ           50
+#define SERVO_RESOLUTION        LEDC_TIMER_14_BIT
+#define SERVO_MIN_PULSEWIDTH_US 500   // 0.5ms for 0 degrees
+#define SERVO_MAX_PULSEWIDTH_US 2500  // 2.5ms for 180 degrees
+#define SERVO_MAX_DEGREE        180
+
+static bool servo_initialized = false;
+static int current_servo_angle = 90;
+
 // Forward declarations for MCP server to call
 void audio_play_beep(int tone_index);
 void audio_set_volume(int volume);
@@ -95,6 +130,54 @@ static void generate_beep_tone(int16_t *buffer, size_t samples, uint32_t frequen
 }
 #endif
 
+// Set MCP notification timeout (called when LED icon is shown via MCP)
+void mcp_notification_set_timeout(void)
+{
+    uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    mcp_notification_dim_time = now_ms + MCP_NOTIFICATION_DIM_DELAY_MS;
+    mcp_notification_clear_time = now_ms + MCP_NOTIFICATION_TIMEOUT_MS;
+    led_matrix_set_brightness(MCP_NOTIFICATION_FULL_BRIGHTNESS);
+    ESP_LOGI(TAG, "MCP notification: full brightness for 5s, then dim, timeout 5min");
+}
+
+// Save current MCP icon state for restoration after touch events
+void mcp_notification_set_icon(const char *icon, uint32_t color)
+{
+    if (icon) {
+        strncpy(mcp_current_icon, icon, sizeof(mcp_current_icon) - 1);
+        mcp_current_icon[sizeof(mcp_current_icon) - 1] = '\0';
+    } else {
+        mcp_current_icon[0] = '\0';
+    }
+    mcp_current_icon_color = color;
+}
+
+// Clear MCP notification (can be called via MCP tool)
+void mcp_notification_clear(void)
+{
+    if (mcp_notification_clear_time != 0) {
+        mcp_notification_clear_requested = true;
+        mcp_notification_dim_time = 0;
+        ESP_LOGI(TAG, "MCP notification clear requested");
+    }
+}
+
+// Check if MCP notification is active
+bool mcp_notification_is_active(void)
+{
+    return mcp_notification_clear_time != 0;
+}
+
+#if CONFIG_IDF_TARGET_ESP32P4
+// IO0 button interrupt handler
+static void IRAM_ATTR io0_button_isr_handler(void *arg)
+{
+    if (mcp_notification_clear_time != 0) {
+        mcp_notification_clear_requested = true;  // Signal to clear in animation task
+    }
+}
+#endif
+
 static void touch_state_callback(touch_button_handle_t handle, uint32_t channel, touch_state_t state, void *user_data)
 {
     static const uint32_t colors[] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00};
@@ -102,6 +185,11 @@ static void touch_state_callback(touch_button_handle_t handle, uint32_t channel,
     if (state == TOUCH_STATE_ACTIVE) {
         active_channel = channel;
         ESP_LOGI(TAG, "Channel %" PRIu32 " is Active", channel);
+
+        // Clear MCP notification when touch button pressed
+        if (mcp_notification_clear_time != 0) {
+            mcp_notification_clear_requested = true;  // Will be cleared in animation task
+        }
 
         // Update MCP server button state
         mcp_server_update_button_state((int)channel, true);
@@ -193,7 +281,6 @@ typedef struct {
     uint32_t param2;  // duration_ms for FREQ
 } audio_event_msg_t;
 
-static QueueHandle_t audio_cmd_queue = NULL;
 static volatile bool s_audio_stop_flag = false;
 
 // Functions for MCP server to call
@@ -335,11 +422,6 @@ void audio_play_sound(const char *name)
     }
 }
 
-void audio_play_melody(const char *name)
-{
-    audio_play_sound(name);
-}
-
 static void led_animation_task(void *pvParameters)
 {
     while (1) {
@@ -367,8 +449,8 @@ static void led_animation_task(void *pvParameters)
                 // Extend (or set) the hold window — only same-key repeats get full effect
                 number_hold_until_ms = now_ms + NUMBER_HOLD_MS;
             } else if (evt.type == LED_EVENT_INACTIVE) {
-                // Only clear if the hold period has already expired
-                if ((int32_t)(now_ms - number_hold_until_ms) >= 0) {
+                // Only clear if the hold period has already expired AND no MCP notification active
+                if ((int32_t)(now_ms - number_hold_until_ms) >= 0 && mcp_notification_clear_time == 0) {
                     led_matrix_clear();
                     displayed_channel = 0;
                 }
@@ -376,28 +458,185 @@ static void led_animation_task(void *pvParameters)
             }
         }
 
-        // --- 1b. Auto-clear once hold period expires ---
+        // --- 1b. Auto-clear once hold period expires, restore MCP icon if active ---
         if (number_hold_until_ms != 0 && (int32_t)(now_ms - number_hold_until_ms) >= 0) {
-            led_matrix_clear();
+            if (mcp_notification_clear_time == 0) {
+                led_matrix_clear();
+            } else if (mcp_current_icon[0] != '\0') {
+                led_matrix_show_icon(mcp_current_icon, mcp_current_icon_color);
+            }
             number_hold_until_ms = 0;
             displayed_channel = 0;
         }
 
-        // --- 2. Natural energy decay each frame ---
-        for (int i = 0; i < 4; i++) {
-            if (channel_energy[i] > 2) {
-                channel_energy[i] -= 2;
-                led_matrix_set_energy(i + 1, channel_energy[i]);
-            } else if (channel_energy[i] > 0) {
-                channel_energy[i] = 0;
-                led_matrix_set_energy(i + 1, 0);
+        // --- 1c. MCP notification: button press clear request ---
+        if (mcp_notification_clear_requested) {
+            led_matrix_clear();
+            led_matrix_set_brightness(MCP_NOTIFICATION_FULL_BRIGHTNESS);
+            mcp_notification_clear_time = 0;
+            mcp_notification_dim_time = 0;
+            mcp_notification_clear_requested = false;
+            mcp_current_icon[0] = '\0';
+            ESP_LOGI(TAG, "MCP notification cleared (button press)");
+        }
+
+        // --- 1d. MCP notification: dim after 5 seconds ---
+        if (mcp_notification_dim_time != 0) {
+            if ((int32_t)(now_ms - mcp_notification_dim_time) >= 0) {
+                led_matrix_set_brightness(MCP_NOTIFICATION_DIM_BRIGHTNESS);
+                mcp_notification_dim_time = 0;
+                ESP_LOGI(TAG, "MCP notification dimmed");
             }
         }
 
-        // --- 3. Render one animation frame ---
-        led_matrix_update();
+        // --- 1e. MCP notification timeout check (5 minutes) ---
+        if (mcp_notification_clear_time != 0) {
+            if ((int32_t)(now_ms - mcp_notification_clear_time) >= 0) {
+                led_matrix_clear();
+                led_matrix_set_brightness(MCP_NOTIFICATION_FULL_BRIGHTNESS);
+                mcp_notification_clear_time = 0;
+                mcp_notification_dim_time = 0;
+                mcp_current_icon[0] = '\0';
+                ESP_LOGI(TAG, "MCP notification cleared (timeout)");
+            }
+        }
+
+        // --- 2. Natural energy decay and animation (only when no MCP notification) ---
+        if (mcp_notification_clear_time == 0) {
+            for (int i = 0; i < 4; i++) {
+                if (channel_energy[i] > 2) {
+                    channel_energy[i] -= 2;
+                    led_matrix_set_energy(i + 1, channel_energy[i]);
+                } else if (channel_energy[i] > 0) {
+                    channel_energy[i] = 0;
+                    led_matrix_set_energy(i + 1, 0);
+                }
+            }
+            // Render one animation frame (includes fadeToBlack)
+            led_matrix_update();
+        }
+        // MCP notification is static, no animation needed
+
         vTaskDelay(pdMS_TO_TICKS(20)); // 50 FPS
     }
+}
+
+// Convert angle to LEDC duty cycle
+static uint32_t servo_angle_to_duty(int angle)
+{
+    if (angle < 0) {
+        angle = 0;
+    }
+    if (angle > SERVO_MAX_DEGREE) {
+        angle = SERVO_MAX_DEGREE;
+    }
+
+    uint32_t pulse_width_us = SERVO_MIN_PULSEWIDTH_US +
+                              (SERVO_MAX_PULSEWIDTH_US - SERVO_MIN_PULSEWIDTH_US) * angle / SERVO_MAX_DEGREE;
+
+    uint32_t max_duty = (1 << SERVO_RESOLUTION) - 1;
+    uint32_t duty = pulse_width_us * max_duty * SERVO_FREQ_HZ / 1000000;
+
+    return duty;
+}
+
+// Initialize servo
+static esp_err_t servo_init(void)
+{
+    if (servo_initialized) {
+        return ESP_OK;
+    }
+
+    ledc_timer_config_t timer_conf = {
+        .speed_mode = SERVO_LEDC_SPEED_MODE,
+        .duty_resolution = SERVO_RESOLUTION,
+        .timer_num = SERVO_LEDC_TIMER,
+        .freq_hz = SERVO_FREQ_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    esp_err_t ret = ledc_timer_config(&timer_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure LEDC timer: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ledc_channel_config_t channel_conf = {
+        .gpio_num = SERVO_GPIO,
+        .speed_mode = SERVO_LEDC_SPEED_MODE,
+        .channel = SERVO_LEDC_CHANNEL,
+        .timer_sel = SERVO_LEDC_TIMER,
+        .duty = servo_angle_to_duty(90),
+        .hpoint = 0,
+    };
+    ret = ledc_channel_config(&channel_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure LEDC channel: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    servo_initialized = true;
+    current_servo_angle = 90;
+    ESP_LOGI(TAG, "Servo initialized on GPIO %d", SERVO_GPIO);
+    return ESP_OK;
+}
+
+// Set servo angle (0-180 degrees)
+void servo_set_angle(int angle)
+{
+    if (!servo_initialized) {
+        servo_init();
+    }
+
+    if (angle < 0) {
+        angle = 0;
+    }
+    if (angle > SERVO_MAX_DEGREE) {
+        angle = SERVO_MAX_DEGREE;
+    }
+
+    uint32_t duty = servo_angle_to_duty(angle);
+    ledc_set_duty(SERVO_LEDC_SPEED_MODE, SERVO_LEDC_CHANNEL, duty);
+    ledc_update_duty(SERVO_LEDC_SPEED_MODE, SERVO_LEDC_CHANNEL);
+    current_servo_angle = angle;
+    ESP_LOGI(TAG, "Servo set to %d degrees (duty: %lu)", angle, (unsigned long)duty);
+}
+
+// Sweep servo from current position to target angle
+void servo_sweep(int from_angle, int to_angle, int step_delay_ms)
+{
+    if (!servo_initialized) {
+        servo_init();
+    }
+
+    if (from_angle < 0) {
+        from_angle = 0;
+    }
+    if (from_angle > SERVO_MAX_DEGREE) {
+        from_angle = SERVO_MAX_DEGREE;
+    }
+    if (to_angle < 0) {
+        to_angle = 0;
+    }
+    if (to_angle > SERVO_MAX_DEGREE) {
+        to_angle = SERVO_MAX_DEGREE;
+    }
+    if (step_delay_ms < 5) {
+        step_delay_ms = 5;
+    }
+
+    int step = (from_angle < to_angle) ? 1 : -1;
+
+    for (int angle = from_angle; angle != to_angle; angle += step) {
+        servo_set_angle(angle);
+        vTaskDelay(pdMS_TO_TICKS(step_delay_ms));
+    }
+    servo_set_angle(to_angle);
+}
+
+// Get current servo angle
+int servo_get_angle(void)
+{
+    return current_servo_angle;
 }
 #endif
 
@@ -451,6 +690,27 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to create audio event queue");
         return;
     }
+
+    // Initialize servo motor on GPIO21
+    ret = servo_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize servo: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Servo motor initialized on GPIO %d", SERVO_GPIO);
+    }
+
+    // Initialize IO0 button for clearing MCP notifications
+    gpio_config_t io0_conf = {
+        .pin_bit_mask = (1ULL << BUTTON_IO0_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,  // Trigger on falling edge (button press)
+    };
+    gpio_config(&io0_conf);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(BUTTON_IO0_GPIO, io0_button_isr_handler, NULL);
+    ESP_LOGI(TAG, "IO0 button initialized for clearing MCP notifications");
 #endif
 
     // Create LED event queue (touch callback -> animation task)
@@ -496,6 +756,56 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "MCP Server initialized successfully");
     }
+
+#if CONFIG_IDF_TARGET_ESP32P4
+    // === Startup animation ===
+    ESP_LOGI(TAG, "Playing startup animation...");
+
+    // 1. Servo sweep: 90 -> 0 -> 180 -> 90
+    ESP_LOGI(TAG, "Servo startup sweep");
+    servo_sweep(90, 0, 8);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    servo_sweep(0, 180, 8);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    servo_sweep(180, 90, 8);
+
+    // 2. Play startup sound
+    audio_play_sound("startup");
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // 3. Show WiFi icon briefly
+    led_matrix_show_icon("wifi", 0x00FF00);  // Green WiFi icon
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // 4. Scroll WiFi SSID and IP (2 cycles only)
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        char startup_msg[64];
+        snprintf(startup_msg, sizeof(startup_msg), "WIFI %s IP %d.%d.%d.%d",
+                 CONFIG_EXAMPLE_WIFI_SSID,
+                 IP2STR(&ip_info.ip));
+        led_matrix_scroll_text(startup_msg, 0x00FFFF, 70);
+
+        // Wait for 2 scroll cycles: (text_len * 9 + 8) pixels per cycle * 70ms * 2 cycles
+        int text_len = strlen(startup_msg);
+        int one_cycle_ms = (text_len * 9 + 8) * 70;
+        int two_cycles_ms = one_cycle_ms * 2;
+        vTaskDelay(pdMS_TO_TICKS(two_cycles_ms));
+
+        // Stop scrolling
+        led_matrix_stop_scroll();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // 5. Show check icon to indicate ready
+    led_matrix_show_icon("check", 0x00FF00);
+    audio_play_sound("success");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    led_matrix_clear();
+
+    ESP_LOGI(TAG, "Startup animation complete!");
+#endif
 
     // Main loop can do other things now
     uint32_t start_time = 0;
