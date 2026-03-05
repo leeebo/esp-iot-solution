@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
@@ -60,6 +61,9 @@ static uint32_t mcp_current_icon_color = 0;
 // IO0 button GPIO
 #define BUTTON_IO0_GPIO 0
 
+// Heartbeat interval: 25 minutes
+#define HEARTBEAT_INTERVAL_MS (25 * 60 * 1000)
+
 // LED event queue — callback sends events, anim task processes them
 typedef enum {
     LED_EVENT_ACTIVE,
@@ -83,7 +87,7 @@ static QueueHandle_t audio_event_queue = NULL;
 #define BEEP_DURATION_MS 200
 #define AUDIO_BUFFER_SIZE (AUDIO_SAMPLE_RATE * BEEP_DURATION_MS / 1000 * AUDIO_CHANNELS)
 #define NUM_BEEP_TONES 4
-#define AUDIO_VOLUME 80 // Volume level (0-100)
+#define AUDIO_VOLUME 50 // Volume level (0-100)
 
 // Different beep frequencies for different channels (higher frequencies for better clarity)
 static const uint32_t beep_frequencies[] = {880, 988, 1047, 1319}; // A5, B5, C6, E6
@@ -395,6 +399,18 @@ static const uint16_t snd_confirm_d[] = {100, 100, 300};
 static const uint16_t snd_cancel_f[] = {523};
 static const uint16_t snd_cancel_d[] = {400};
 
+// Minion style sound - high-pitched, fast, chattery like "Ba-ba-ba banana!"
+static const uint16_t snd_minion_f[] = {1200, 1400, 1200, 1500, 1300, 1600, 1400, 1100, 1500, 1200};
+static const uint16_t snd_minion_d[] = {60, 60, 60, 80, 60, 100, 60, 60, 120, 80};
+
+// Minion laugh - "hehehe"
+static const uint16_t snd_minion_laugh_f[] = {1800, 1600, 1800, 1600, 1800, 1600, 2000};
+static const uint16_t snd_minion_laugh_d[] = {50, 50, 50, 50, 50, 50, 150};
+
+// Minion "Bello!" greeting
+static const uint16_t snd_minion_bello_f[] = {800, 1200, 1000, 1400};
+static const uint16_t snd_minion_bello_d[] = {120, 100, 80, 200};
+
 static const preset_sound_t preset_sounds[] = {
     {"success", snd_success_f, snd_success_d, 3},
     {"error", snd_error_f, snd_error_d, 2},
@@ -406,6 +422,9 @@ static const preset_sound_t preset_sounds[] = {
     {"alert", snd_alert_f, snd_alert_d, 4},
     {"confirm", snd_confirm_f, snd_confirm_d, 3},
     {"cancel", snd_cancel_f, snd_cancel_d, 1},
+    {"minion", snd_minion_f, snd_minion_d, 10},
+    {"minion_laugh", snd_minion_laugh_f, snd_minion_laugh_d, 7},
+    {"minion_bello", snd_minion_bello_f, snd_minion_bello_d, 4},
 };
 
 void audio_play_sound(const char *name)
@@ -638,6 +657,98 @@ int servo_get_angle(void)
 {
     return current_servo_angle;
 }
+
+// Minion sounds rotation
+static const char *minion_sounds[] = {"minion", "minion_laugh", "minion_bello"};
+static int minion_sound_index = 0;
+
+// Heartbeat LED icons (yellow minion style)
+static const char *heartbeat_icons[] = {"heart", "star", "heart"};
+static const uint32_t heartbeat_colors[] = {0xFFFF00, 0xFFCC00, 0xFF8800};
+
+// Heartbeat volume (lower than normal)
+#define HEARTBEAT_VOLUME 20
+#define NORMAL_VOLUME 50
+
+// Heartbeat timer callback - minion shakes and speaks to show we're alive
+static void heartbeat_timer_callback(void *arg)
+{
+    const char *sound = minion_sounds[minion_sound_index];
+    const char *icon = heartbeat_icons[minion_sound_index];
+    uint32_t color = heartbeat_colors[minion_sound_index];
+
+    ESP_LOGI(TAG, "Heartbeat: Minion plays '%s'", sound);
+
+    // Save previous MCP icon state
+    char prev_icon[32];
+    uint32_t prev_color = mcp_current_icon_color;
+    strncpy(prev_icon, mcp_current_icon, sizeof(prev_icon));
+    prev_icon[sizeof(prev_icon) - 1] = '\0';
+
+    // Show heartbeat LED icon
+    led_matrix_show_icon(icon, color);
+
+    // Lower volume for heartbeat
+    audio_set_volume(HEARTBEAT_VOLUME);
+
+    // Minion wiggle dance
+    int center = servo_get_angle();
+    servo_sweep(center, center - 20, 8);
+    servo_sweep(center - 20, center + 20, 8);
+    servo_sweep(center + 20, center - 15, 8);
+    servo_sweep(center - 15, center + 15, 8);
+    servo_sweep(center + 15, center, 8);
+
+    // Play current sound
+    audio_play_sound(sound);
+
+    // Restore normal volume
+    audio_set_volume(NORMAL_VOLUME);
+
+    // Brief pause to show icon
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Restore previous MCP icon or clear
+    if (prev_icon[0] != '\0') {
+        led_matrix_show_icon(prev_icon, prev_color);
+        ESP_LOGI(TAG, "Heartbeat: Restored icon '%s'", prev_icon);
+    } else {
+        led_matrix_clear();
+    }
+
+    // Rotate to next sound
+    minion_sound_index = (minion_sound_index + 1) % 3;
+}
+
+static esp_timer_handle_t heartbeat_timer = NULL;
+
+// Start heartbeat timer
+static esp_err_t heartbeat_timer_start(void)
+{
+    esp_timer_create_args_t timer_args = {
+        .callback = heartbeat_timer_callback,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "heartbeat",
+    };
+
+    esp_err_t ret = esp_timer_create(&timer_args, &heartbeat_timer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create heartbeat timer: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_timer_start_periodic(heartbeat_timer, HEARTBEAT_INTERVAL_MS * 1000ULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start heartbeat timer: %s", esp_err_to_name(ret));
+        esp_timer_delete(heartbeat_timer);
+        heartbeat_timer = NULL;
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Heartbeat timer started: every %d minutes", HEARTBEAT_INTERVAL_MS / 60000);
+    return ESP_OK;
+}
 #endif
 
 void app_main(void)
@@ -805,6 +916,9 @@ void app_main(void)
     led_matrix_clear();
 
     ESP_LOGI(TAG, "Startup animation complete!");
+
+    // Start heartbeat timer - shake servo and play sound every 25 minutes
+    heartbeat_timer_start();
 #endif
 
     // Main loop can do other things now
