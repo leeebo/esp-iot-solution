@@ -87,7 +87,7 @@ static QueueHandle_t audio_event_queue = NULL;
 #define BEEP_DURATION_MS 200
 #define AUDIO_BUFFER_SIZE (AUDIO_SAMPLE_RATE * BEEP_DURATION_MS / 1000 * AUDIO_CHANNELS)
 #define NUM_BEEP_TONES 4
-#define AUDIO_VOLUME 50 // Volume level (0-100)
+#define AUDIO_VOLUME 70 // Volume level (0-100)
 
 // Different beep frequencies for different channels (higher frequencies for better clarity)
 static const uint32_t beep_frequencies[] = {880, 988, 1047, 1319}; // A5, B5, C6, E6

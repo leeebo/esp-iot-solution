@@ -10,7 +10,7 @@ dependencies:
   cmake_utilities: "0.*"
   touch_button_sensor:
     version: "*"
-    override_path: "/home/libo/prox_sensor/components/touch/touch_button_sensor"
+    override_path: "../../../../components/touch/touch_button_sensor"
   espressif/esp32_p4_function_ev_board:
     version: "*"
     rules:
@@ -27,6 +27,6 @@ dependencies:
     path: "${IDF_PATH}/examples/common_components/protocol_examples_common"
   mcp-c-sdk:
     version: "*"
-    override_path: "/home/libo/mcp_vide_coding/components/mcp-c-sdk"
+    override_path: "../../../../components/mcp-c-sdk"
   espressif/mdns:
     version: "*"
